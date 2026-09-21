@@ -2,6 +2,7 @@
 /*
 
 !.gitignore
+!requirements.txt
 !main_v6.py
 !config.yaml
 !detection_tuner.py
