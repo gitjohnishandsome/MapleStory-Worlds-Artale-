@@ -1,0 +1,16 @@
+# 預設全部忽略，只白名單現役的 main_v6 那套 + 工具腳本
+/*
+
+!.gitignore
+!main_v6.py
+!config.yaml
+!detection_tuner.py
+!coordinate_picker.py
+!calibrate_minimap.py
+!遊戲視窗截圖.py
+
+!Image/
+Image/*
+!Image/monster_rabbit_*.png
+!Image/yellow_dot.png
+!Image/red_dot.png

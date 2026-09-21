@@ -1,0 +1,63 @@
+# main_v6.py 設定檔 — 改這裡的數字不用碰程式碼
+
+paths:
+  window_title: "MapleStory Worlds-Artale (繁體中文版)"
+
+keys:
+  left: "left"
+  right: "right"
+  up: "up"
+  down: "down"
+  jump: "space"
+  teleport: "x"
+  magic_attack: "a"
+
+# 動作按鍵按住的時間（毫秒），直接用 pyautogui 控制鍵盤，不再透過 AutoHotkey
+timings:
+  walk_short_ms: 700          # 短走
+  walk_long_ms: 1800          # 長走
+  jump_walk_total_ms: 2000    # 跳躍移動總時長
+  correct_walk_ms: 1200       # 位置校正－純走路
+  correct_teleport_ms: 1000   # 位置校正－瞬移（X+方向鍵各撐住的時間）
+  attack_direction_hold_ms: 200   # 攻擊時，方向鍵撐住的時間
+  attack_teleport_hold_ms: 200    # 攻擊時，X 撐住的時間
+  attack_cast_hold_ms: 200        # 每次按 A 放魔法撐住的時間
+  attack_double_cast_probability: 0.6   # 補放第二次魔法攻擊的機率
+  attack_opposite_probability: 0.6      # 打完再往反方向補一輪攻擊的機率
+  attack_up_probability: 0.3            # 額外補一次「上+瞬移+魔法攻擊」的機率
+  attack_down_probability: 0.3          # 額外補一次「下+瞬移+魔法攻擊」的機率
+
+game_view:
+  region: [0, 0, 1280, 800]      # 相對於視窗 client area 的 [x, y, w, h]
+
+monster_detection:
+  template_glob: "Image/monster_rabbit_*.png"
+  match_threshold: 0.50
+
+minimap:
+  region: [0, 80, 230, 120]       # [x, y, w, h]
+  yellow_dot_template: "Image/yellow_dot.png"
+  left_ratio: 0.45
+  right_ratio: 0.7
+  match_threshold: 0.7
+  red_dot_template: "Image/red_dot.png"   # 其他玩家在小地圖上的紅點
+  red_dot_match_threshold: 0.7
+
+behavior:
+  walk_probability: 0.7           # 沒偵測到怪時，隨機走動 vs 停頓的機率
+  ignore_monster_probability: 0.1 # 就算看到怪，也有低機率不理它、隨便走走
+  walk_mode_weights:              # 走動時，短走/長走/跳躍走的相對比例
+    short: 0.5
+    long: 0.2
+    jump: 0.3
+  loop_delay_range: [1.0, 2.0]    # 每輪動作之間的隨機停頓秒數
+  detection_interval: 0.4         # 背景偵測執行緒每隔多久重新截圖分析一次
+
+safety:
+  max_runtime_hours: 2            # 開機時 GUI 視窗預設帶入的執行分鐘數（2小時=120分鐘）
+  stop_grace_seconds: 20          # 時間到了先暫停動作，倒數這麼多秒再真正結束，留時間給你自己操作
+  enable_failsafe: true           # 滑鼠移到螢幕角落緊急中斷
+
+logging:
+  enabled: true                   # 是否把執行過程存成 log 檔案
+  directory: "logs"               # log 檔案存放的資料夾（相對於專案目錄）
