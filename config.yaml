@@ -23,16 +23,23 @@ timings:
   attack_teleport_hold_ms: 200    # 攻擊時，X 撐住的時間
   attack_cast_hold_ms: 200        # 每次按 A 放魔法撐住的時間
   attack_double_cast_probability: 0.6   # 補放第二次魔法攻擊的機率
-  attack_opposite_probability: 0.6      # 打完再往反方向補一輪攻擊的機率
-  attack_up_probability: 0.3            # 額外補一次「上+瞬移+魔法攻擊」的機率
-  attack_down_probability: 0.3          # 額外補一次「下+瞬移+魔法攻擊」的機率
+  attack_opposite_probability: 0.6      # 打完再往反方向補一輪攻擊的機率（只用在左右方向）
 
 game_view:
   region: [0, 0, 1280, 800]      # 相對於視窗 client area 的 [x, y, w, h]
 
+character_detection:
+  team_blood_template: "Image/team_blood.png"   # 隊伍血條樣本圖，用來自動算 HSV 顏色範圍
+  hsv_margin: [10, 40, 40]                       # 從樣本圖算出的 HSV 範圍再往外放寬多少，容忍色差
+  min_area: 30                                   # 遮罩後紅色區塊要有多大面積才算真的是血條，濾掉雜訊
+  exclude_bottom_px: 150                         # 搜尋時排除畫面最下面這麼多像素，避開HP/MP/快捷鍵UI條
+  max_width: 100                                 # 紅色區塊寬度超過這個值就跳過，排除比隊伍血條粗很多的UI血條
+
 monster_detection:
   template_glob: "Image/monster_rabbit_*.png"
   match_threshold: 0.50
+  attack_range_x: 400   # 角色左右這個像素範圍內的兔子才會被拿去計算攻擊方向，太遠的忽略
+  vertical_deadzone_y: 40   # 左右平手時，兔子跟角色的 y 差距超過這個值才算「明顯偏上/偏下」
 
 minimap:
   region: [0, 80, 230, 120]       # [x, y, w, h]
@@ -57,7 +64,23 @@ safety:
   max_runtime_hours: 2            # 開機時 GUI 視窗預設帶入的執行分鐘數（2小時=120分鐘）
   stop_grace_seconds: 20          # 時間到了先暫停動作，倒數這麼多秒再真正結束，留時間給你自己操作
   enable_failsafe: true           # 滑鼠移到螢幕角落緊急中斷
+  incident_capture_key: "ctrl+s"       # 按這個鍵：立刻停止腳本 + 連續截圖，方便事後除錯
+  incident_screenshot_count: 5         # 要連續截幾張
+  incident_screenshot_interval: 0.3    # 每張間隔幾秒
 
 logging:
   enabled: true                   # 是否把執行過程存成 log 檔案
   directory: "logs"               # log 檔案存放的資料夾（相對於專案目錄）
+
+debug_window:
+  enabled: true                   # 要不要開即時視覺化除錯視窗，不需要時可以整個關掉
+  display_scale: 0.5              # 視窗顯示縮放比例，螢幕太小可以調小一點
+
+pickup_route:
+  routes_dir: "pickup_routes"        # 撿錢路線檔案存放資料夾
+  navigate_tolerance: 8              # 移動到路線起點時，小地圖 x 座標差距在這範圍內就算到了
+  navigate_max_attempts: 30          # 水平修正最多嘗試幾次，避免卡住無限重試
+  navigate_walk_ms: 300               # 移動到起點時，左右走一步的時間
+  navigate_teleport_ms: 150           # 往下瞬移到地平線時，瞬移撐住的時間
+  drop_to_ground_attempts: 2          # 進撿錢模式前，先往下瞬移幾次，強制落到地平線
+  attacks_before_pickup: [4, 6]       # 累積這麼多次攻擊後才進撿錢模式（隨機取這個範圍內的整數）

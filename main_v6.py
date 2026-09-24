@@ -2,6 +2,7 @@ import threading
 import time
 import random
 import glob
+import json
 import os
 import sys
 import winsound
@@ -68,10 +69,19 @@ DIRECTION_KEYS = {"left": KEY_LEFT, "right": KEY_RIGHT, "up": KEY_UP, "down": KE
 T = config["timings"]
 
 game_view_region = tuple(config["game_view"]["region"])
-screen_center_x = game_view_region[2] // 2  # 假設角色永遠在畫面正中間
+screen_center_x = game_view_region[2] // 2  # 偵測不到角色時的備援中心點
+screen_center_y = game_view_region[3] // 2  # 偵測不到角色時的備援垂直中心點
+
+team_blood_template_path = os.path.join(data_location, config["character_detection"]["team_blood_template"])
+character_hsv_margin = tuple(config["character_detection"]["hsv_margin"])
+character_min_area = config["character_detection"]["min_area"]
+character_exclude_bottom_px = config["character_detection"]["exclude_bottom_px"]
+character_max_width = config["character_detection"]["max_width"]
 
 monster_template_glob = os.path.join(data_location, config["monster_detection"]["template_glob"])
 monster_match_threshold = config["monster_detection"]["match_threshold"]
+monster_attack_range_x = config["monster_detection"]["attack_range_x"]
+vertical_deadzone_y = config["monster_detection"]["vertical_deadzone_y"]
 
 minimap_region = tuple(config["minimap"]["region"])
 yellow_dot_template_path = os.path.join(data_location, config["minimap"]["yellow_dot_template"])
@@ -90,6 +100,21 @@ detection_interval = config["behavior"]["detection_interval"]
 default_runtime_minutes = config["safety"]["max_runtime_hours"] * 60
 stop_grace_seconds = config["safety"]["stop_grace_seconds"]
 enable_failsafe = config["safety"]["enable_failsafe"]
+incident_capture_key = config["safety"]["incident_capture_key"]
+incident_screenshot_count = config["safety"]["incident_screenshot_count"]
+incident_screenshot_interval = config["safety"]["incident_screenshot_interval"]
+incident_dir = os.path.join(data_location, "incident_screenshots")
+
+debug_window_enabled = config["debug_window"]["enabled"]
+debug_window_scale = config["debug_window"]["display_scale"]
+
+pickup_routes_dir = os.path.join(data_location, config["pickup_route"]["routes_dir"])
+navigate_tolerance = config["pickup_route"]["navigate_tolerance"]
+navigate_max_attempts = config["pickup_route"]["navigate_max_attempts"]
+navigate_walk_ms = config["pickup_route"]["navigate_walk_ms"]
+navigate_teleport_ms = config["pickup_route"]["navigate_teleport_ms"]
+drop_to_ground_attempts = config["pickup_route"]["drop_to_ground_attempts"]
+attacks_before_pickup_range = tuple(config["pickup_route"]["attacks_before_pickup"])
 
 # 霧氣導致對比度下降時，用 CLAHE 拉回對比，讓樣板比對比較不受影響
 clahe_processor = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -98,7 +123,9 @@ clahe_processor = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 pyautogui.FAILSAFE = enable_failsafe
 
 stop_event = threading.Event()
-keyboard.add_hotkey("esc", lambda: (print("🛑 偵測到 ESC，準備結束"), stop_event.set()))
+keyboard.add_hotkey(
+    "esc", lambda: (print("🛑 偵測到 ESC，準備結束"), stop_event.set()), suppress=True
+)
 
 
 # === 警示音 ===
@@ -199,6 +226,38 @@ def capture_region(hwnd, rel_region):
     return cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
 
 
+# === 緊急中斷＋連續截圖（除錯用）===
+hwnd = None  # 遊戲視窗還沒抓到前，先給個預設值，避免熱鍵在那之前被按會噴錯
+
+
+def capture_incident_screenshots():
+    if hwnd is None:
+        print("❌ 遊戲視窗還沒抓到，無法截圖")
+        return
+
+    os.makedirs(incident_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    for i in range(1, incident_screenshot_count + 1):
+        try:
+            frame = capture_region(hwnd, game_view_region)
+            path = os.path.join(incident_dir, f"incident_{timestamp}_{i}.png")
+            cv2.imwrite(path, frame)
+            print(f"📸 已存第 {i} 張：{os.path.basename(path)}")
+        except Exception as e:
+            print(f"❌ 第 {i} 張截圖失敗：{e}")
+        if i < incident_screenshot_count:
+            time.sleep(incident_screenshot_interval)
+
+
+def trigger_incident_capture():
+    print(f"🆘 偵測到 {incident_capture_key.upper()}，緊急停止腳本並連續截圖...")
+    stop_event.set()
+    capture_incident_screenshots()
+
+
+keyboard.add_hotkey(incident_capture_key, trigger_incident_capture, suppress=True)
+
+
 def apply_clahe(image_bgr):
     """對亮度通道做對比限制自適應直方圖均衡化，減緩霧氣造成的對比度下降。"""
     lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB)
@@ -206,6 +265,68 @@ def apply_clahe(image_bgr):
     l_eq = clahe_processor.apply(l)
     lab_eq = cv2.merge((l_eq, a, b))
     return cv2.cvtColor(lab_eq, cv2.COLOR_LAB2BGR)
+
+
+# === 角色定位：用顏色遮罩找隊伍血條，取代「假設角色永遠在畫面中間」===
+def compute_hsv_bounds_from_sample(sample_bgr, margin, s_min=180, v_min=150):
+    """從一張顏色固定的樣本圖，自動算出 HSV 上下限。
+
+    樣本裁圖邊緣常會混到黑色外框、背景等雜訊像素，直接統計全部像素會讓範圍失真，
+    所以先篩掉不夠飽和/不夠亮的像素，只用剩下的核心顏色像素算中位數。
+    """
+    hsv = cv2.cvtColor(sample_bgr, cv2.COLOR_BGR2HSV).reshape(-1, 3)
+    core_mask = (hsv[:, 1] >= s_min) & (hsv[:, 2] >= v_min)
+    core_pixels = hsv[core_mask]
+    if len(core_pixels) == 0:
+        core_pixels = hsv  # 萬一篩過頭全部濾掉了，退回用全部像素
+
+    med = np.median(core_pixels, axis=0)
+    h_margin, s_margin, v_margin = margin
+
+    lower = np.array([
+        max(int(med[0]) - h_margin, 0),
+        max(int(med[1]) - s_margin, 0),
+        max(int(med[2]) - v_margin, 0),
+    ])
+    upper = np.array([
+        min(int(med[0]) + h_margin, 179),
+        min(int(med[1]) + s_margin, 255),
+        min(int(med[2]) + v_margin, 255),
+    ])
+    return lower, upper
+
+
+def load_character_hsv_bounds():
+    sample = cv2.imread(team_blood_template_path, cv2.IMREAD_COLOR)
+    if sample is None:
+        raise ValueError(f"❌ 找不到隊伍血條樣本圖：{team_blood_template_path}")
+    return compute_hsv_bounds_from_sample(sample, character_hsv_margin)
+
+
+def find_character_position_in_frame(frame_raw, lower_hsv, upper_hsv):
+    """在畫面裡找隊伍血條顏色的色塊，回傳 (x, y) 中心座標；血條長度變化不影響偵測。
+
+    排除畫面最下面的 UI 區域（HP/MP/快捷鍵條也是紅色，且比隊伍血條大很多，
+    不排除的話「挑最大色塊」永遠會選到那個固定不動的 UI 血條），
+    並過濾掉寬度異常大的色塊，避免抓錯目標。
+    """
+    search_h = max(frame_raw.shape[0] - character_exclude_bottom_px, 1)
+    hsv = cv2.cvtColor(frame_raw[:search_h], cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    candidates = [c for c in contours if cv2.boundingRect(c)[2] <= character_max_width]
+    if not candidates:
+        return None
+
+    largest = max(candidates, key=cv2.contourArea)
+    if cv2.contourArea(largest) < character_min_area:
+        return None
+
+    x, y, w, h = cv2.boundingRect(largest)
+    return x + w / 2, y + h / 2
 
 
 # === 怪物偵測 ===
@@ -244,9 +365,9 @@ def find_local_maxima(result, template_hw, threshold):
     return kept
 
 
-def find_monster_positions(hwnd, templates):
-    """回傳畫面上所有偵測到的兔子中心 x 座標（跨樣板/鏡像去重複後的清單）。"""
-    frame = apply_clahe(capture_region(hwnd, game_view_region))
+def find_template_boxes(frame_raw, templates, threshold):
+    """在給定的一張畫面上找出所有超過門檻值的樣板比對框（跨樣板/鏡像去重複後）。"""
+    frame = apply_clahe(frame_raw)
 
     all_boxes = []  # (score, x, y, w, h)
     for template in templates:
@@ -254,10 +375,10 @@ def find_monster_positions(hwnd, templates):
         if th > frame.shape[0] or tw > frame.shape[1]:
             continue
         result = cv2.matchTemplate(frame, template, cv2.TM_CCOEFF_NORMED)
-        for score, x, y in find_local_maxima(result, (th, tw), monster_match_threshold):
+        for score, x, y in find_local_maxima(result, (th, tw), threshold):
             all_boxes.append((score, x, y, tw, th))
 
-    # 不同樣板/鏡像版本可能比對到同一隻兔子，跨樣板再做一次 NMS 避免重複計算
+    # 不同樣板/鏡像版本可能比對到同一個目標，跨樣板再做一次 NMS 避免重複計算
     all_boxes.sort(key=lambda b: -b[0])
     final_boxes = []
     for score, x, y, w, h in all_boxes:
@@ -271,7 +392,12 @@ def find_monster_positions(hwnd, templates):
         if not too_close:
             final_boxes.append((score, x, y, w, h))
 
-    return [x + w / 2 for _, x, y, w, h in final_boxes]
+    return final_boxes
+
+
+def find_monster_boxes(frame_raw, templates):
+    """在給定的一張畫面上找出所有偵測到的兔子框。"""
+    return find_template_boxes(frame_raw, templates, monster_match_threshold)
 
 
 # === 小地圖黃點偵測 ===
@@ -282,14 +408,14 @@ def load_yellow_dot_template():
     return template
 
 
-def find_dot_x(hwnd, template):
-    minimap_img = capture_region(hwnd, minimap_region)
+def find_dot_position_in_frame(minimap_img, template):
+    """回傳黃點在小地圖裁圖裡的 (x, y) 中心座標；找不到回傳 None。"""
     result = cv2.matchTemplate(minimap_img, template, cv2.TM_CCOEFF_NORMED)
     _, max_val, _, max_loc = cv2.minMaxLoc(result)
     if max_val < dot_match_threshold:
         return None
     th, tw = template.shape[:2]
-    return max_loc[0] + tw // 2
+    return max_loc[0] + tw // 2, max_loc[1] + th // 2
 
 
 # === 小地圖紅點偵測（其他玩家）===
@@ -300,44 +426,126 @@ def load_red_dot_template():
     return template
 
 
-def find_red_dot_present(hwnd, template):
-    minimap_img = capture_region(hwnd, minimap_region)
+def find_red_dot_present_in_frame(minimap_img, template):
     result = cv2.matchTemplate(minimap_img, template, cv2.TM_CCOEFF_NORMED)
     _, max_val, _, _ = cv2.minMaxLoc(result)
     return max_val >= red_dot_match_threshold
+
+
+# === 即時視覺化除錯畫面 ===
+def draw_game_debug_frame(frame_raw, monster_boxes, character_x):
+    img = frame_raw.copy()
+    center_x = character_x if character_x is not None else screen_center_x
+
+    for score, x, y, w, h in monster_boxes:
+        box_center_x = x + w / 2
+        in_range = abs(box_center_x - center_x) <= monster_attack_range_x
+        color = (0, 200, 0) if in_range else (0, 0, 200)  # 範圍內綠框，範圍外暗紅框（不會被拿去攻擊）
+        cv2.rectangle(img, (x, y), (x + w, y + h), color, 2)
+        cv2.putText(
+            img, f"{score:.2f}", (x, max(y - 5, 12)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA,
+        )
+
+    # 攻擊範圍框：橘色兩條線，範圍內的兔子才會被拿去計算攻擊方向
+    range_left = int(center_x - monster_attack_range_x)
+    range_right = int(center_x + monster_attack_range_x)
+    cv2.line(img, (range_left, 0), (range_left, img.shape[0]), (0, 128, 255), 2)
+    cv2.line(img, (range_right, 0), (range_right, img.shape[0]), (0, 128, 255), 2)
+
+    if character_x is not None:
+        # 實際偵測到的角色位置：紅線
+        cv2.line(img, (int(character_x), 0), (int(character_x), img.shape[0]), (0, 0, 255), 2)
+    else:
+        # 偵測不到時的備援中心點：黃線
+        cv2.line(img, (screen_center_x, 0), (screen_center_x, img.shape[0]), (0, 255, 255), 1)
+    return img
+
+
+def draw_minimap_debug_frame(minimap_img, dot_x, dot_y, other_player_nearby):
+    img = minimap_img.copy()
+    h, w = img.shape[:2]
+    left_bound = int(w * minimap_left_ratio)
+    right_bound = int(w * minimap_right_ratio)
+    cv2.line(img, (left_bound, 0), (left_bound, h), (0, 255, 255), 1)
+    cv2.line(img, (right_bound, 0), (right_bound, h), (0, 255, 255), 1)
+    if dot_x is not None and dot_y is not None:
+        cv2.circle(img, (int(dot_x), int(dot_y)), 4, (0, 255, 0), -1)
+    if other_player_nearby:
+        cv2.putText(img, "PLAYER!", (2, 14), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+    return cv2.resize(img, (w * 2, h * 2), interpolation=cv2.INTER_NEAREST)
+
+
+def combine_debug_frame(game_debug_frame, minimap_debug_frame):
+    """把小地圖除錯畫面疊在遊戲畫面右上角，合併成一個視窗，不用同時開兩個。"""
+    combined = game_debug_frame.copy()
+    mh, mw = minimap_debug_frame.shape[:2]
+    gh, gw = combined.shape[:2]
+    mw, mh = min(mw, gw), min(mh, gh)
+    combined[0:mh, gw - mw:gw] = minimap_debug_frame[0:mh, 0:mw]
+    return combined
 
 
 # === 共用狀態：背景偵測執行緒寫入，主執行緒讀取 ===
 class DetectionState:
     def __init__(self):
         self.lock = threading.Lock()
-        self.monster_positions = []
+        self.monster_positions = []  # [(x, y), ...]
         self.dot_x = None
+        self.dot_y = None
         self.other_player_nearby = False
+        self.character_x = None
+        self.character_y = None
+        self.debug_frame = None
 
-    def update(self, monster_positions, dot_x, other_player_nearby):
+    def update(self, monster_positions, dot_x, dot_y, other_player_nearby, character_x, character_y, debug_frame):
         with self.lock:
             self.monster_positions = monster_positions
             self.dot_x = dot_x
+            self.dot_y = dot_y
             self.other_player_nearby = other_player_nearby
+            self.character_x = character_x
+            self.character_y = character_y
+            self.debug_frame = debug_frame
 
     def read(self):
         with self.lock:
-            return self.monster_positions, self.dot_x, self.other_player_nearby
+            return (
+                self.monster_positions, self.dot_x, self.dot_y, self.other_player_nearby,
+                self.character_x, self.character_y,
+            )
+
+    def read_debug_frame(self):
+        with self.lock:
+            return self.debug_frame
 
 
-def detection_loop(hwnd, monster_templates, yellow_dot_template, red_dot_template, state):
+def detection_loop(hwnd, monster_templates, yellow_dot_template, red_dot_template, character_hsv_bounds, state):
+    lower_hsv, upper_hsv = character_hsv_bounds
     while not stop_event.is_set():
         try:
             pyautogui.failSafeCheck()  # screenshot() 本身不會檢查角落，要自己主動呼叫
-            monster_positions = find_monster_positions(hwnd, monster_templates)
-            dot_x = find_dot_x(hwnd, yellow_dot_template)
-            other_player_nearby = find_red_dot_present(hwnd, red_dot_template)
+            game_frame = capture_region(hwnd, game_view_region)
+            minimap_frame = capture_region(hwnd, minimap_region)
+
+            character_pos = find_character_position_in_frame(game_frame, lower_hsv, upper_hsv)
+            character_x, character_y = character_pos if character_pos is not None else (None, None)
+            monster_boxes = find_monster_boxes(game_frame, monster_templates)
+            monster_positions = [(x + w / 2, y + h / 2) for _, x, y, w, h in monster_boxes]
+            dot_pos = find_dot_position_in_frame(minimap_frame, yellow_dot_template)
+            dot_x, dot_y = dot_pos if dot_pos is not None else (None, None)
+            other_player_nearby = find_red_dot_present_in_frame(minimap_frame, red_dot_template)
+
+            debug_frame = None
+            if debug_window_enabled:
+                game_debug_frame = draw_game_debug_frame(game_frame, monster_boxes, character_x)
+                minimap_debug_frame = draw_minimap_debug_frame(minimap_frame, dot_x, dot_y, other_player_nearby)
+                debug_frame = combine_debug_frame(game_debug_frame, minimap_debug_frame)
         except pyautogui.FailSafeException:
             print("🛑 滑鼠移到螢幕角落，觸發緊急停止")
             stop_event.set()
             return
-        state.update(monster_positions, dot_x, other_player_nearby)
+        state.update(monster_positions, dot_x, dot_y, other_player_nearby, character_x, character_y, debug_frame)
         stop_event.wait(detection_interval)
 
 
@@ -381,6 +589,89 @@ def teleport(direction, hold_ms):
     pyautogui.keyUp(key)
 
 
+# === 朝小地圖上的目標座標移動，一步步靠近（撿錢路線重播前，先走到路線起點用）===
+def navigate_to_point(hwnd, yellow_dot_template, target_x):
+    """先強制往下瞬移到地平線，再單純用水平移動修正到目標 x，不用一直檢查 y 座標。"""
+    for _ in range(drop_to_ground_attempts):
+        teleport("down", navigate_teleport_ms)
+
+    for attempt in range(1, navigate_max_attempts + 1):
+        minimap_frame = capture_region(hwnd, minimap_region)
+        dot_pos = find_dot_position_in_frame(minimap_frame, yellow_dot_template)
+        if dot_pos is None:
+            print(f"⚠ [移動到起點 {attempt}/{navigate_max_attempts}] 小地圖上找不到黃點，放棄這次移動")
+            return False
+
+        dot_x, _ = dot_pos
+        dx = target_x - dot_x
+
+        if abs(dx) <= navigate_tolerance:
+            print(f"✅ 已抵達路線起點附近（黃點 x={dot_x}）")
+            return True
+
+        direction = "right" if dx > 0 else "left"
+        walk(direction, navigate_walk_ms)
+
+    print(f"⚠ 移動到起點失敗（已達 {navigate_max_attempts} 次嘗試上限）")
+    return False
+
+
+# === 撿錢路線：載入 route_recorder.py 錄好的路線，走到起點後重播按鍵時間軸 ===
+def load_pickup_routes():
+    paths = sorted(glob.glob(os.path.join(pickup_routes_dir, "route_*.json")))
+    if not paths:
+        print(f"ℹ 找不到撿錢路線檔案（{pickup_routes_dir}/route_*.json），撿錢路線模式將會停用")
+        return []
+
+    routes = []
+    for p in paths:
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                route = json.load(f)
+            route["_name"] = os.path.basename(p)
+            routes.append(route)
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"⚠ 讀取路線檔案失敗：{p}（{e}）")
+    return routes
+
+
+def play_route(route):
+    focus_window()
+    events = sorted(route["events"], key=lambda e: e["t"])
+
+    last_t = 0.0
+    for ev in events:
+        wait_s = ev["t"] - last_t
+        if wait_s > 0:
+            time.sleep(wait_s)
+        last_t = ev["t"]
+        if ev["event"] == "down":
+            pyautogui.keyDown(ev["key"])
+        else:
+            pyautogui.keyUp(ev["key"])
+
+    # 保險：錄製萬一漏記某個放開事件，重播完強制全部放開，避免按鍵卡住
+    for key in (KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN, KEY_TELEPORT):
+        pyautogui.keyUp(key)
+
+
+def run_pickup_route(hwnd, yellow_dot_template, routes):
+    if not routes:
+        return
+
+    route = random.choice(routes)
+    print(f"🗺 挑選撿錢路線：{route.get('_name', '?')}，先移動到起點")
+
+    reached = navigate_to_point(hwnd, yellow_dot_template, route["start_x"])
+    if not reached:
+        print("⚠ 沒能走到路線起點，跳過這次撿錢路線")
+        return
+
+    print("▶ 開始重播撿錢路線")
+    play_route(route)
+    print("✅ 撿錢路線執行完畢")
+
+
 def attack_in_direction(direction):
     """direction: 'Left' / 'Right' / 'None'"""
     if direction != "None":
@@ -406,19 +697,11 @@ def attack_toward(direction):
     focus_window()
     attack_in_direction(direction)
 
-    if direction != "None" and random.random() < T["attack_opposite_probability"]:
+    # 反方向補刀只用在左右（上下沒有明確定義的「反方向」，交給真實偵測決定）
+    if direction in ("Left", "Right") and random.random() < T["attack_opposite_probability"]:
         opposite = "Right" if direction == "Left" else "Left"
         time.sleep(0.15)
         attack_in_direction(opposite)
-
-    # 額外機率補一次上/下瞬移攻擊，涵蓋小山丘之類的高低地形
-    if random.random() < T["attack_up_probability"]:
-        time.sleep(0.15)
-        attack_in_direction("Up")
-
-    if random.random() < T["attack_down_probability"]:
-        time.sleep(0.15)
-        attack_in_direction("Down")
 
 
 # === 位置校正（用背景執行緒最新算好的 dot_x，不用重新截圖）===
@@ -471,12 +754,57 @@ def wander():
         time.sleep(random.uniform(0.5, 1.5))
 
 
+# === 顯示即時視覺化除錯視窗（只能在主執行緒呼叫，OpenCV 的視窗不是每個後端都支援多執行緒）===
+DEBUG_WINDOW_NAME = "main_v6 - 除錯畫面"
+_debug_window_ready = False
+
+
+def show_debug_windows(state):
+    global _debug_window_ready
+    if not debug_window_enabled:
+        return
+
+    debug_frame = state.read_debug_frame()
+    if debug_frame is None:
+        return
+
+    if not _debug_window_ready:
+        cv2.namedWindow(DEBUG_WINDOW_NAME, cv2.WINDOW_NORMAL)
+        h, w = debug_frame.shape[:2]
+        cv2.resizeWindow(DEBUG_WINDOW_NAME, int(w * debug_window_scale), int(h * debug_window_scale))
+
+        # 強制擺在遊戲視窗右邊，避免疊在遊戲視窗上面，截圖時截到除錯視窗自己
+        try:
+            game_left, game_top, game_right, _ = win32gui.GetWindowRect(hwnd)
+            cv2.moveWindow(DEBUG_WINDOW_NAME, game_right + 10, game_top)
+        except Exception:
+            pass  # 拿不到視窗座標就算了，用預設位置
+        _debug_window_ready = True
+
+    cv2.imshow(DEBUG_WINDOW_NAME, debug_frame)
+    cv2.waitKey(1)
+
+
+def wait_with_debug(seconds, state):
+    """取代單純的 stop_event.wait()，等待的同時持續刷新除錯視窗，避免視窗卡住沒反應。"""
+    end_time = time.time() + seconds
+    while time.time() < end_time and not stop_event.is_set():
+        show_debug_windows(state)
+        time.sleep(0.05)
+
+
 # === 主邏輯 ===
 monster_templates = load_monster_templates()
 print(f"📂 讀到怪物樣板圖（含自動鏡像共 {len(monster_templates)} 個比對版本）")
 
 yellow_dot_template = load_yellow_dot_template()
 red_dot_template = load_red_dot_template()
+character_hsv_bounds = load_character_hsv_bounds()
+print(f"🎨 角色定位顏色範圍（HSV）：{character_hsv_bounds[0]} ~ {character_hsv_bounds[1]}")
+
+pickup_routes = load_pickup_routes()
+if pickup_routes:
+    print(f"🗺 讀到 {len(pickup_routes)} 條撿錢路線")
 
 runtime_minutes = ask_runtime_minutes(default_runtime_minutes)
 
@@ -485,7 +813,7 @@ hwnd = bring_window_to_front(window_title)
 detection_state = DetectionState()
 detection_thread = threading.Thread(
     target=detection_loop,
-    args=(hwnd, monster_templates, yellow_dot_template, red_dot_template, detection_state),
+    args=(hwnd, monster_templates, yellow_dot_template, red_dot_template, character_hsv_bounds, detection_state),
     daemon=True,
 )
 detection_thread.start()
@@ -496,6 +824,8 @@ print("⌨ 直接用 pyautogui 控制鍵盤，不再透過 AutoHotkey")
 step_count = 0
 start_time = time.time()
 was_paused_for_player = False
+attacks_since_pickup = 0
+attacks_until_pickup = random.randint(*attacks_before_pickup_range)
 
 while not stop_event.is_set():
     elapsed_minutes = (time.time() - start_time) / 60
@@ -511,13 +841,13 @@ while not stop_event.is_set():
         stop_event.set()
         break
 
-    _, _, other_player_nearby = detection_state.read()
+    _, _, _, other_player_nearby, _, _ = detection_state.read()
     if other_player_nearby:
         if not was_paused_for_player:
             print("🚨 小地圖偵測到其他玩家，暫停動作！請自行判斷後續處理")
             play_alert_sound()
             was_paused_for_player = True
-        stop_event.wait(1.0)
+        wait_with_debug(1.0, detection_state)
         continue
     elif was_paused_for_player:
         print("✅ 其他玩家已離開小地圖範圍，恢復動作")
@@ -527,31 +857,57 @@ while not stop_event.is_set():
     print(f"[{step_count}]")
 
     try:
-        monster_positions, dot_x, _ = detection_state.read()
+        monster_positions, dot_x, dot_y, _, character_x, character_y = detection_state.read()
+        center_x = character_x if character_x is not None else screen_center_x
+        center_y = character_y if character_y is not None else screen_center_y
+        in_range_monsters = [(x, y) for x, y in monster_positions if abs(x - center_x) <= monster_attack_range_x]
 
-        if monster_positions and random.random() >= ignore_monster_probability:
-            left_count = sum(1 for x in monster_positions if x < screen_center_x)
-            right_count = sum(1 for x in monster_positions if x > screen_center_x)
-            print(f"🐰 偵測到 {len(monster_positions)} 隻兔子（左 {left_count} / 右 {right_count}）")
+        if in_range_monsters and random.random() >= ignore_monster_probability:
+            left_count = sum(1 for x, y in in_range_monsters if x < center_x)
+            right_count = sum(1 for x, y in in_range_monsters if x > center_x)
+            print(
+                f"🐰 範圍內 {len(in_range_monsters)} 隻兔子（左 {left_count} / 右 {right_count}，"
+                f"畫面上共看到 {len(monster_positions)} 隻），角色位置 x={center_x:.0f}"
+                f"{'（真實偵測）' if character_x is not None else '（備援中心點）'}"
+            )
 
             if left_count > right_count:
                 attack_toward("Left")
             elif right_count > left_count:
                 attack_toward("Right")
             else:
-                attack_toward("None")
+                # 左右平手，改看有沒有兔子明顯偏上/偏下
+                up_count = sum(1 for x, y in in_range_monsters if y < center_y - vertical_deadzone_y)
+                down_count = sum(1 for x, y in in_range_monsters if y > center_y + vertical_deadzone_y)
+                print(f"   左右平手，改看上下（上 {up_count} / 下 {down_count}）")
+
+                if up_count > down_count:
+                    attack_toward("Up")
+                elif down_count > up_count:
+                    attack_toward("Down")
+                else:
+                    attack_toward("None")
+
+            attacks_since_pickup += 1
+            print(f"   已累積攻擊 {attacks_since_pickup}/{attacks_until_pickup} 次才會進撿錢模式")
+            if attacks_since_pickup >= attacks_until_pickup:
+                run_pickup_route(hwnd, yellow_dot_template, pickup_routes)
+                attacks_since_pickup = 0
+                attacks_until_pickup = random.randint(*attacks_before_pickup_range)
         else:
-            if monster_positions:
-                print("🙃 有看到兔子，但這次隨機決定不理它")
+            if in_range_monsters:
+                print("🙃 範圍內有看到兔子，但這次隨機決定不理它")
             wander()
 
-        _, latest_dot_x, _ = detection_state.read()
+        _, latest_dot_x, _, _, _, _ = detection_state.read()
         correct_position(latest_dot_x)
     except pyautogui.FailSafeException:
         print("🛑 滑鼠移到螢幕角落，觸發緊急停止")
         stop_event.set()
         break
 
-    stop_event.wait(random.uniform(*loop_delay_range))
+    wait_with_debug(random.uniform(*loop_delay_range), detection_state)
+
+cv2.destroyAllWindows()
 
 print("👋 腳本已結束")
