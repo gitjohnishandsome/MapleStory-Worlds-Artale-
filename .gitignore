@@ -10,9 +10,12 @@
 !coordinate_picker.py
 !calibrate_minimap.py
 !遊戲視窗截圖.py
+!route_recorder.py
+!route_tester.py
 
 !Image/
 Image/*
 !Image/monster_rabbit_*.png
 !Image/yellow_dot.png
 !Image/red_dot.png
+!Image/team_blood.png
