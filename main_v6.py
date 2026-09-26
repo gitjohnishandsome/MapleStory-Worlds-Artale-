@@ -7,6 +7,7 @@ import os
 import sys
 import winsound
 import tkinter as tk
+from tkinter import messagebox
 from datetime import datetime
 
 import cv2
@@ -134,6 +135,22 @@ def play_alert_sound():
     for _ in range(3):
         winsound.Beep(1200, 300)
         time.sleep(0.1)
+
+
+# === 開機提醒：先組隊亮出血條，角色定位才會準 ===
+def show_party_reminder():
+    root = tk.Tk()
+    root.withdraw()  # 不用顯示空白主視窗，只跳提示框
+    root.attributes("-topmost", True)
+    messagebox.showinfo(
+        "開始前確認",
+        "請先在遊戲裡建立隊伍（按 P 建立），確保角色頭上有顯示紅色隊伍血條。\n\n"
+        "這條血條是用來偵測角色實際位置的依據，沒有顯示的話攻擊方向判斷會退回"
+        "「假設角色永遠在畫面中間」的備援模式，準確度會下降。\n\n"
+        "確認好之後按「確定」繼續。",
+        parent=root,
+    )
+    root.destroy()
 
 
 # === 啟動設定視窗：這次要跑幾分鐘 ===
@@ -806,6 +823,7 @@ pickup_routes = load_pickup_routes()
 if pickup_routes:
     print(f"🗺 讀到 {len(pickup_routes)} 條撿錢路線")
 
+show_party_reminder()
 runtime_minutes = ask_runtime_minutes(default_runtime_minutes)
 
 hwnd = bring_window_to_front(window_title)
@@ -834,9 +852,9 @@ while not stop_event.is_set():
         print(f"⏳ {stop_grace_seconds} 秒後程式自動結束，你將自行進自由市場")
         play_alert_sound()
         time.sleep(20)
-        click_relative_to_window(window_title, 961, 772)
+        click_relative_to_window(window_title, 961, 700)
         time.sleep(2)
-        click_relative_to_window(window_title, 961, 772)
+        click_relative_to_window(window_title, 961, 700)
         stop_event.wait(stop_grace_seconds)
         stop_event.set()
         break
