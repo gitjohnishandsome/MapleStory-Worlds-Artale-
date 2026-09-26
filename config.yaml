@@ -78,6 +78,10 @@ gm_alert_icon:
   match_threshold: 0.75
   miss_alert_count: 5   # 連續這麼多次（約 x detection_interval 秒）偵測不到這個圖示，就響鈴＋存證截圖＋強制中斷程式（不是暫停，因為這代表可能要開始外掛偵測了）
 
+alerts:
+  discord_webhook_url: "https://discord.com/api/webhooks/1553316658699964506/HNd3DCFmb8bAUZtsfw6u14Ta6rHL_dm04wB1DbyQUi_Jq1Z1To9xK2CHRuHzlmEhJpk3"   # 在 Discord 伺服器「頻道設定 > 整合 > Webhook」建立一個，把網址貼在這裡；留空就不會發送遠端通知，只會響本機喇叭
+  discord_user_id: "1019916529925627966"   # 開發者模式後右鍵自己的名字「複製使用者 ID」貼這裡；填了每則通知會 @你，保證跳出桌面通知，留空就是普通訊息
+
 debug_window:
   enabled: true                   # 要不要開即時視覺化除錯視窗，不需要時可以整個關掉
   display_scale: 0.5              # 視窗顯示縮放比例，螢幕太小可以調小一點

@@ -13,6 +13,7 @@ from datetime import datetime
 import cv2
 import numpy as np
 import pyautogui
+import requests
 import yaml
 import keyboard
 import win32con
@@ -111,6 +112,9 @@ gm_icon_template_path = os.path.join(data_location, config["gm_alert_icon"]["tem
 gm_icon_match_threshold = config["gm_alert_icon"]["match_threshold"]
 gm_icon_miss_alert_count = config["gm_alert_icon"]["miss_alert_count"]
 
+discord_webhook_url = config["alerts"]["discord_webhook_url"]
+discord_user_id = config["alerts"]["discord_user_id"]
+
 debug_window_enabled = config["debug_window"]["enabled"]
 debug_window_scale = config["debug_window"]["display_scale"]
 
@@ -140,6 +144,18 @@ def play_alert_sound():
     for _ in range(3):
         winsound.Beep(1200, 300)
         time.sleep(0.1)
+
+
+# === 遠端通知：本機喇叭以外，額外推一份到 Discord，人不在電腦前也看得到 ===
+def send_discord_alert(message):
+    if not discord_webhook_url:
+        return
+    if discord_user_id:
+        message = f"<@{discord_user_id}> {message}"  # @ 自己，保證跳出桌面通知，不受頻道通知設定影響
+    try:
+        requests.post(discord_webhook_url, json={"content": message}, timeout=5)
+    except Exception as e:
+        print(f"⚠ Discord 通知發送失敗：{e}")
 
 
 # === 開機提醒：先組隊亮出血條，角色定位才會準 ===
@@ -275,6 +291,7 @@ def capture_incident_screenshots():
 def trigger_incident_capture():
     print(f"🆘 偵測到 {incident_capture_key.upper()}，緊急停止腳本並連續截圖...")
     stop_event.set()
+    send_discord_alert(f"🆘 手動觸發緊急停止（{incident_capture_key.upper()}），已停止並存證截圖")
     capture_incident_screenshots()
 
 
@@ -598,6 +615,7 @@ def detection_loop(hwnd, monster_templates, yellow_dot_template, red_dot_templat
                 print(f"🚨🚨 連續 {gm_icon_miss_alert_count} 次偵測不到警戒圖示，強制中斷程式！")
                 stop_event.set()
                 play_alert_sound()
+                send_discord_alert(f"🚨🚨 連續偵測不到警戒圖示，腳本已強制停止（{window_title}）")
                 capture_incident_screenshots()
                 return
 
@@ -609,6 +627,7 @@ def detection_loop(hwnd, monster_templates, yellow_dot_template, red_dot_templat
         except pyautogui.FailSafeException:
             print("🛑 滑鼠移到螢幕角落，觸發緊急停止")
             stop_event.set()
+            send_discord_alert("🛑 滑鼠移到螢幕角落，已觸發緊急停止")
             return
         state.update(
             monster_positions, dot_x, dot_y, other_player_nearby, character_x, character_y, debug_frame,
@@ -905,6 +924,7 @@ while not stop_event.is_set():
         print(f"⏰ 已執行 {elapsed_minutes:.1f} 分鐘，達到本次設定上限，停止動作")
         print(f"⏳ {stop_grace_seconds} 秒後程式自動結束，你將自行進自由市場")
         play_alert_sound()
+        send_discord_alert(f"⏰ 已執行 {elapsed_minutes:.1f} 分鐘，時間到，準備自動結束")
         time.sleep(20)
         click_relative_to_window(window_title, 961, 700)
         time.sleep(2)
@@ -918,6 +938,7 @@ while not stop_event.is_set():
         if not was_paused_for_player:
             print("🚨 小地圖偵測到其他玩家，暫停動作！請自行判斷後續處理")
             play_alert_sound()
+            send_discord_alert("🚨 小地圖偵測到其他玩家，已暫停動作")
             was_paused_for_player = True
         wait_with_debug(1.0, detection_state)
         continue
@@ -930,6 +951,7 @@ while not stop_event.is_set():
             reason = "小地圖黃點" if minimap_detection_broken else "角色位置（隊伍血條）"
             print(f"🚨 連續 {detection_failure_alert_count} 次偵測不到{reason}，可能視窗被移動/縮放/切到背景，暫停動作！")
             play_alert_sound()
+            send_discord_alert(f"🚨 連續偵測不到{reason}，已暫停動作，可能視窗被移動/縮放/切到背景")
             was_paused_for_detection_failure = True
         wait_with_debug(1.0, detection_state)
         continue
@@ -988,6 +1010,7 @@ while not stop_event.is_set():
     except pyautogui.FailSafeException:
         print("🛑 滑鼠移到螢幕角落，觸發緊急停止")
         stop_event.set()
+        send_discord_alert("🛑 滑鼠移到螢幕角落，已觸發緊急停止")
         break
 
     wait_with_debug(random.uniform(*loop_delay_range), detection_state)
