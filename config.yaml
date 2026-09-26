@@ -67,10 +67,16 @@ safety:
   incident_capture_key: "ctrl+s"       # 按這個鍵：立刻停止腳本 + 連續截圖，方便事後除錯
   incident_screenshot_count: 5         # 要連續截幾張
   incident_screenshot_interval: 0.3    # 每張間隔幾秒
+  detection_failure_alert_count: 15    # 小地圖黃點或角色定位「連續」偵測失敗這麼多次（約等於 x detection_interval 秒）就跳警示暫停，避免視窗被移動/縮小/切到背景時安靜地繼續亂打
 
 logging:
   enabled: true                   # 是否把執行過程存成 log 檔案
   directory: "logs"               # log 檔案存放的資料夾（相對於專案目錄）
+
+gm_alert_icon:
+  template: "Image/gm_watch_icon.png"   # 畫面右上角固定顯示的圖示，正常應該一直看得到
+  match_threshold: 0.75
+  miss_alert_count: 5   # 連續這麼多次（約 x detection_interval 秒）偵測不到這個圖示，就響鈴＋存證截圖＋強制中斷程式（不是暫停，因為這代表可能要開始外掛偵測了）
 
 debug_window:
   enabled: true                   # 要不要開即時視覺化除錯視窗，不需要時可以整個關掉

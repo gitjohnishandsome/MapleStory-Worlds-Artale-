@@ -8,6 +8,8 @@
 import os
 import glob
 import time
+import threading
+import winsound
 import tkinter as tk
 from tkinter import filedialog, ttk
 
@@ -92,7 +94,27 @@ DETECTORS = {
         "default_threshold": config["minimap"]["red_dot_match_threshold"],
         "capture_region": minimap_region,
     },
+    "警戒圖示 (gm_watch_icon.png)": {
+        "glob": os.path.join(data_location, config["gm_alert_icon"]["template"]),
+        "mirror": False,
+        "use_clahe": False,
+        "default_threshold": config["gm_alert_icon"]["match_threshold"],
+        "capture_region": game_view_region,
+    },
 }
+
+# 「警戒圖示消失警報」這個功能專用的即時監控測試，跟上面 DETECTORS 的單張截圖比對不同，
+# 這裡是模擬 main_v6.py 背景執行緒的「連續偵測失敗才觸發」邏輯，方便正式上場前先驗證門檻值/連續次數夠不夠準。
+gm_icon_template_path = os.path.join(data_location, config["gm_alert_icon"]["template"])
+gm_icon_match_threshold_default = config["gm_alert_icon"]["match_threshold"]
+gm_icon_miss_alert_count_default = config["gm_alert_icon"]["miss_alert_count"]
+monitor_interval_default = config["behavior"]["detection_interval"]
+
+
+def play_alert_beep():
+    for _ in range(3):
+        winsound.Beep(1200, 300)
+        time.sleep(0.1)
 
 
 class DetectionTunerApp:
@@ -134,6 +156,34 @@ class DetectionTunerApp:
         self.threshold_readout = tk.Label(control_frame, text="", width=6)
         self.threshold_readout.pack(side="left", padx=4)
 
+        monitor_frame = tk.LabelFrame(root, text="即時監控測試：警戒圖示消失警報（gm_alert_icon）")
+        monitor_frame.pack(side="top", fill="x", padx=8, pady=(0, 8))
+
+        self.monitor_running = False
+        self.monitor_stop_event = threading.Event()
+        self.monitor_thread = None
+        self.gm_icon_template = imread_unicode(gm_icon_template_path)
+        self.gm_icon_miss_streak = 0
+
+        if self.gm_icon_template is None:
+            tk.Label(
+                monitor_frame, text=f"❌ 找不到樣板圖：{gm_icon_template_path}", fg="red"
+            ).pack(side="left", padx=6, pady=4)
+        else:
+            tk.Label(monitor_frame, text="門檻值：").pack(side="left", padx=(6, 0), pady=4)
+            self.monitor_threshold_var = tk.DoubleVar(value=gm_icon_match_threshold_default)
+            tk.Entry(monitor_frame, textvariable=self.monitor_threshold_var, width=6).pack(side="left")
+
+            tk.Label(monitor_frame, text="連續次數：").pack(side="left", padx=(10, 0))
+            self.monitor_count_var = tk.IntVar(value=gm_icon_miss_alert_count_default)
+            tk.Entry(monitor_frame, textvariable=self.monitor_count_var, width=4).pack(side="left")
+
+            self.monitor_button = tk.Button(monitor_frame, text="▶ 開始監控", command=self.toggle_monitor)
+            self.monitor_button.pack(side="left", padx=10)
+
+            self.monitor_status_label = tk.Label(monitor_frame, text="尚未開始", fg="#555")
+            self.monitor_status_label.pack(side="left", padx=6)
+
         self.image_label = tk.Label(root, text="請先開啟一張圖片", bg="#222", fg="#ccc")
         self.image_label.pack(side="top", padx=8, pady=8)
 
@@ -141,6 +191,72 @@ class DetectionTunerApp:
         self.result_text.pack(side="top", padx=8, pady=(0, 8))
 
         self.reload_templates()
+
+    def toggle_monitor(self):
+        if self.monitor_running:
+            self.stop_monitor()
+        else:
+            self.start_monitor()
+
+    def start_monitor(self):
+        hwnd = win32gui.FindWindow(None, window_title)
+        if not hwnd:
+            self.monitor_status_label.config(text=f"❌ 找不到遊戲視窗：{window_title}", fg="red")
+            return
+
+        self.monitor_stop_event.clear()
+        self.gm_icon_miss_streak = 0
+        self.monitor_running = True
+        self.monitor_button.config(text="⏹ 停止監控")
+        self.monitor_status_label.config(text="監控中...", fg="#555")
+        self.monitor_thread = threading.Thread(target=self._monitor_loop, args=(hwnd,), daemon=True)
+        self.monitor_thread.start()
+
+    def stop_monitor(self):
+        self.monitor_stop_event.set()
+        self.monitor_running = False
+        self.monitor_button.config(text="▶ 開始監控")
+        self.monitor_status_label.config(text="已停止", fg="#555")
+
+    def _monitor_loop(self, hwnd):
+        while not self.monitor_stop_event.is_set():
+            try:
+                rel_x, rel_y, w, h = game_view_region
+                abs_x, abs_y = win32gui.ClientToScreen(hwnd, (rel_x, rel_y))
+                screenshot = pyautogui.screenshot(region=(abs_x, abs_y, w, h))
+                frame = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+                result = cv2.matchTemplate(frame, self.gm_icon_template, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, _ = cv2.minMaxLoc(result)
+            except Exception as e:
+                self.root.after(0, lambda err=e: self.monitor_status_label.config(text=f"❌ 截圖/比對失敗：{err}", fg="red"))
+                if self.monitor_stop_event.wait(1.0):
+                    break
+                continue
+
+            threshold = self.monitor_threshold_var.get()
+            alert_count = self.monitor_count_var.get()
+            present = max_val >= threshold
+            self.gm_icon_miss_streak = 0 if present else self.gm_icon_miss_streak + 1
+            streak = self.gm_icon_miss_streak
+
+            if streak >= alert_count:
+                self.gm_icon_miss_streak = 0  # 重置成 0，讓你可以重複測試觸發
+                self.root.after(0, lambda v=max_val: self._on_monitor_triggered(v))
+            else:
+                text = "✅ 有偵測到" if present else f"⚠ 未偵測到（連續 {streak}/{alert_count} 次）"
+                color = "green" if present else "#cc8800"
+                self.root.after(0, lambda t=text, c=color, v=max_val: self.monitor_status_label.config(
+                    text=f"{t}　分數={v:.3f}", fg=c
+                ))
+
+            if self.monitor_stop_event.wait(monitor_interval_default):
+                break
+
+    def _on_monitor_triggered(self, score):
+        self.monitor_status_label.config(
+            text=f"🚨 已達門檻！（分數={score:.3f}）正式執行時會在這裡響鈴＋存證＋強制停止", fg="red"
+        )
+        threading.Thread(target=play_alert_beep, daemon=True).start()
 
     def on_detector_changed(self):
         spec = DETECTORS[self.detector_var.get()]
@@ -278,7 +394,8 @@ class DetectionTunerApp:
 
 def main():
     root = tk.Tk()
-    DetectionTunerApp(root)
+    app = DetectionTunerApp(root)
+    root.protocol("WM_DELETE_WINDOW", lambda: (app.monitor_stop_event.set(), root.destroy()))
     root.mainloop()
 
 

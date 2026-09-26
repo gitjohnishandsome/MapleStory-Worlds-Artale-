@@ -105,6 +105,11 @@ incident_capture_key = config["safety"]["incident_capture_key"]
 incident_screenshot_count = config["safety"]["incident_screenshot_count"]
 incident_screenshot_interval = config["safety"]["incident_screenshot_interval"]
 incident_dir = os.path.join(data_location, "incident_screenshots")
+detection_failure_alert_count = config["safety"]["detection_failure_alert_count"]
+
+gm_icon_template_path = os.path.join(data_location, config["gm_alert_icon"]["template"])
+gm_icon_match_threshold = config["gm_alert_icon"]["match_threshold"]
+gm_icon_miss_alert_count = config["gm_alert_icon"]["miss_alert_count"]
 
 debug_window_enabled = config["debug_window"]["enabled"]
 debug_window_scale = config["debug_window"]["display_scale"]
@@ -207,23 +212,24 @@ def get_window_rect(title_keyword):
     rect = win32gui.GetWindowRect(hwnd)  # (left, top, right, bottom)
     return hwnd, rect
 
-def click_relative_to_window(title, rel_x, rel_y):
+def click_relative_to_window(title, rel_x, rel_y, move_delay=1):
     hwnd = win32gui.FindWindow(None, title)
     if hwnd == 0:
         raise Exception("找不到視窗")
 
-    # 還原並帶到前景
     win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
     win32gui.SetForegroundWindow(hwnd)
-    time.sleep(0.3)  # 給視窗一點時間反應
+    time.sleep(0.3)
 
-    # 取得客戶區域在螢幕上的絕對座標
     left, top, right, bottom = win32gui.GetClientRect(hwnd)
     screen_left, screen_top = win32gui.ClientToScreen(hwnd, (left, top))
 
     abs_x = screen_left + rel_x
     abs_y = screen_top + rel_y
 
+    pyautogui.moveTo(abs_x, abs_y, duration=0.2)
+    if move_delay > 0:
+        time.sleep(move_delay)
     pyautogui.click(x=abs_x, y=abs_y)
 
 
@@ -449,6 +455,21 @@ def find_red_dot_present_in_frame(minimap_img, template):
     return max_val >= red_dot_match_threshold
 
 
+# === 警戒圖示偵測：畫面右上角的固定圖示，正常應該一直看得到 ===
+def load_gm_icon_template():
+    template = cv2.imread(gm_icon_template_path, cv2.IMREAD_COLOR)
+    if template is None:
+        raise ValueError(f"❌ 找不到警戒圖示樣板圖：{gm_icon_template_path}")
+    return template
+
+
+def find_gm_icon_present_in_frame(frame_raw, template):
+    """圖示本身是固定顏色的 UI 元素，不受遊戲畫面霧氣影響，不需要 CLAHE。"""
+    result = cv2.matchTemplate(frame_raw, template, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, _ = cv2.minMaxLoc(result)
+    return max_val >= gm_icon_match_threshold
+
+
 # === 即時視覺化除錯畫面 ===
 def draw_game_debug_frame(frame_raw, monster_boxes, character_x):
     img = frame_raw.copy()
@@ -514,8 +535,11 @@ class DetectionState:
         self.character_x = None
         self.character_y = None
         self.debug_frame = None
+        self.minimap_detection_broken = False
+        self.character_detection_broken = False
 
-    def update(self, monster_positions, dot_x, dot_y, other_player_nearby, character_x, character_y, debug_frame):
+    def update(self, monster_positions, dot_x, dot_y, other_player_nearby, character_x, character_y, debug_frame,
+               minimap_detection_broken, character_detection_broken):
         with self.lock:
             self.monster_positions = monster_positions
             self.dot_x = dot_x
@@ -524,12 +548,15 @@ class DetectionState:
             self.character_x = character_x
             self.character_y = character_y
             self.debug_frame = debug_frame
+            self.minimap_detection_broken = minimap_detection_broken
+            self.character_detection_broken = character_detection_broken
 
     def read(self):
         with self.lock:
             return (
                 self.monster_positions, self.dot_x, self.dot_y, self.other_player_nearby,
                 self.character_x, self.character_y,
+                self.minimap_detection_broken, self.character_detection_broken,
             )
 
     def read_debug_frame(self):
@@ -537,8 +564,13 @@ class DetectionState:
             return self.debug_frame
 
 
-def detection_loop(hwnd, monster_templates, yellow_dot_template, red_dot_template, character_hsv_bounds, state):
+def detection_loop(hwnd, monster_templates, yellow_dot_template, red_dot_template, gm_icon_template,
+                    character_hsv_bounds, state):
     lower_hsv, upper_hsv = character_hsv_bounds
+    minimap_miss_streak = 0
+    character_miss_streak = 0
+    gm_icon_miss_streak = 0
+
     while not stop_event.is_set():
         try:
             pyautogui.failSafeCheck()  # screenshot() 本身不會檢查角落，要自己主動呼叫
@@ -552,6 +584,22 @@ def detection_loop(hwnd, monster_templates, yellow_dot_template, red_dot_templat
             dot_pos = find_dot_position_in_frame(minimap_frame, yellow_dot_template)
             dot_x, dot_y = dot_pos if dot_pos is not None else (None, None)
             other_player_nearby = find_red_dot_present_in_frame(minimap_frame, red_dot_template)
+            gm_icon_present = find_gm_icon_present_in_frame(game_frame, gm_icon_template)
+
+            # 連續好幾輪都偵測不到，通常代表視窗被移動/縮放/切到背景，而不是單純這一格畫面沒抓到
+            minimap_miss_streak = 0 if dot_pos is not None else minimap_miss_streak + 1
+            character_miss_streak = 0 if character_pos is not None else character_miss_streak + 1
+            minimap_detection_broken = minimap_miss_streak >= detection_failure_alert_count
+            character_detection_broken = character_miss_streak >= detection_failure_alert_count
+
+            # 警戒圖示消失：跟上面兩個不一樣，這個不是暫停，是直接響鈴+存證+強制中斷
+            gm_icon_miss_streak = 0 if gm_icon_present else gm_icon_miss_streak + 1
+            if gm_icon_miss_streak == gm_icon_miss_alert_count:
+                print(f"🚨🚨 連續 {gm_icon_miss_alert_count} 次偵測不到警戒圖示，強制中斷程式！")
+                stop_event.set()
+                play_alert_sound()
+                capture_incident_screenshots()
+                return
 
             debug_frame = None
             if debug_window_enabled:
@@ -562,7 +610,10 @@ def detection_loop(hwnd, monster_templates, yellow_dot_template, red_dot_templat
             print("🛑 滑鼠移到螢幕角落，觸發緊急停止")
             stop_event.set()
             return
-        state.update(monster_positions, dot_x, dot_y, other_player_nearby, character_x, character_y, debug_frame)
+        state.update(
+            monster_positions, dot_x, dot_y, other_player_nearby, character_x, character_y, debug_frame,
+            minimap_detection_broken, character_detection_broken,
+        )
         stop_event.wait(detection_interval)
 
 
@@ -816,6 +867,7 @@ print(f"📂 讀到怪物樣板圖（含自動鏡像共 {len(monster_templates)}
 
 yellow_dot_template = load_yellow_dot_template()
 red_dot_template = load_red_dot_template()
+gm_icon_template = load_gm_icon_template()
 character_hsv_bounds = load_character_hsv_bounds()
 print(f"🎨 角色定位顏色範圍（HSV）：{character_hsv_bounds[0]} ~ {character_hsv_bounds[1]}")
 
@@ -831,7 +883,8 @@ hwnd = bring_window_to_front(window_title)
 detection_state = DetectionState()
 detection_thread = threading.Thread(
     target=detection_loop,
-    args=(hwnd, monster_templates, yellow_dot_template, red_dot_template, character_hsv_bounds, detection_state),
+    args=(hwnd, monster_templates, yellow_dot_template, red_dot_template, gm_icon_template,
+          character_hsv_bounds, detection_state),
     daemon=True,
 )
 detection_thread.start()
@@ -842,6 +895,7 @@ print("⌨ 直接用 pyautogui 控制鍵盤，不再透過 AutoHotkey")
 step_count = 0
 start_time = time.time()
 was_paused_for_player = False
+was_paused_for_detection_failure = False
 attacks_since_pickup = 0
 attacks_until_pickup = random.randint(*attacks_before_pickup_range)
 
@@ -859,7 +913,7 @@ while not stop_event.is_set():
         stop_event.set()
         break
 
-    _, _, _, other_player_nearby, _, _ = detection_state.read()
+    _, _, _, other_player_nearby, _, _, minimap_detection_broken, character_detection_broken = detection_state.read()
     if other_player_nearby:
         if not was_paused_for_player:
             print("🚨 小地圖偵測到其他玩家，暫停動作！請自行判斷後續處理")
@@ -871,11 +925,23 @@ while not stop_event.is_set():
         print("✅ 其他玩家已離開小地圖範圍，恢復動作")
         was_paused_for_player = False
 
+    if minimap_detection_broken or character_detection_broken:
+        if not was_paused_for_detection_failure:
+            reason = "小地圖黃點" if minimap_detection_broken else "角色位置（隊伍血條）"
+            print(f"🚨 連續 {detection_failure_alert_count} 次偵測不到{reason}，可能視窗被移動/縮放/切到背景，暫停動作！")
+            play_alert_sound()
+            was_paused_for_detection_failure = True
+        wait_with_debug(1.0, detection_state)
+        continue
+    elif was_paused_for_detection_failure:
+        print("✅ 偵測恢復正常，繼續動作")
+        was_paused_for_detection_failure = False
+
     step_count += 1
     print(f"[{step_count}]")
 
     try:
-        monster_positions, dot_x, dot_y, _, character_x, character_y = detection_state.read()
+        monster_positions, dot_x, dot_y, _, character_x, character_y, _, _ = detection_state.read()
         center_x = character_x if character_x is not None else screen_center_x
         center_y = character_y if character_y is not None else screen_center_y
         in_range_monsters = [(x, y) for x, y in monster_positions if abs(x - center_x) <= monster_attack_range_x]
@@ -917,7 +983,7 @@ while not stop_event.is_set():
                 print("🙃 範圍內有看到兔子，但這次隨機決定不理它")
             wander()
 
-        _, latest_dot_x, _, _, _, _ = detection_state.read()
+        _, latest_dot_x, _, _, _, _, _, _ = detection_state.read()
         correct_position(latest_dot_x)
     except pyautogui.FailSafeException:
         print("🛑 滑鼠移到螢幕角落，觸發緊急停止")
