@@ -20,3 +20,7 @@ Image/*
 !Image/red_dot.png
 !Image/team_blood.png
 !Image/gm_watch_icon.png
+
+!pickup_routes/
+pickup_routes/*
+!pickup_routes/route_*.json

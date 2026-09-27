@@ -1,0 +1,96 @@
+{
+  "start_x": 166,
+  "start_y": 104,
+  "events": [
+    {
+      "key": "left",
+      "event": "down",
+      "t": 1.609
+    },
+    {
+      "key": "x",
+      "event": "down",
+      "t": 1.668
+    },
+    {
+      "key": "x",
+      "event": "up",
+      "t": 3.391
+    },
+    {
+      "key": "left",
+      "event": "up",
+      "t": 3.864
+    },
+    {
+      "key": "up",
+      "event": "down",
+      "t": 5.326
+    },
+    {
+      "key": "x",
+      "event": "down",
+      "t": 5.416
+    },
+    {
+      "key": "up",
+      "event": "up",
+      "t": 5.641
+    },
+    {
+      "key": "x",
+      "event": "up",
+      "t": 5.643
+    },
+    {
+      "key": "right",
+      "event": "down",
+      "t": 5.799
+    },
+    {
+      "key": "x",
+      "event": "down",
+      "t": 9.196
+    },
+    {
+      "key": "x",
+      "event": "up",
+      "t": 9.466
+    },
+    {
+      "key": "x",
+      "event": "down",
+      "t": 10.163
+    },
+    {
+      "key": "x",
+      "event": "up",
+      "t": 10.411
+    },
+    {
+      "key": "right",
+      "event": "up",
+      "t": 12.166
+    },
+    {
+      "key": "left",
+      "event": "down",
+      "t": 12.279
+    },
+    {
+      "key": "x",
+      "event": "down",
+      "t": 12.371
+    },
+    {
+      "key": "x",
+      "event": "up",
+      "t": 14.974
+    },
+    {
+      "key": "left",
+      "event": "up",
+      "t": 14.975
+    }
+  ]
+}

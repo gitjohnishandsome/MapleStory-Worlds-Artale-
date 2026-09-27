@@ -1,0 +1,136 @@
+{
+  "start_x": 122,
+  "start_y": 104,
+  "events": [
+    {
+      "key": "left",
+      "event": "down",
+      "t": 1.312
+    },
+    {
+      "key": "x",
+      "event": "down",
+      "t": 1.362
+    },
+    {
+      "key": "left",
+      "event": "up",
+      "t": 2.04
+    },
+    {
+      "key": "x",
+      "event": "up",
+      "t": 2.042
+    },
+    {
+      "key": "right",
+      "event": "down",
+      "t": 2.105
+    },
+    {
+      "key": "x",
+      "event": "down",
+      "t": 2.217
+    },
+    {
+      "key": "x",
+      "event": "up",
+      "t": 3.275
+    },
+    {
+      "key": "right",
+      "event": "up",
+      "t": 3.59
+    },
+    {
+      "key": "left",
+      "event": "down",
+      "t": 4.062
+    },
+    {
+      "key": "x",
+      "event": "down",
+      "t": 4.242
+    },
+    {
+      "key": "x",
+      "event": "up",
+      "t": 5.052
+    },
+    {
+      "key": "left",
+      "event": "up",
+      "t": 5.12
+    },
+    {
+      "key": "up",
+      "event": "down",
+      "t": 5.66
+    },
+    {
+      "key": "x",
+      "event": "down",
+      "t": 5.907
+    },
+    {
+      "key": "up",
+      "event": "up",
+      "t": 6.154
+    },
+    {
+      "key": "x",
+      "event": "up",
+      "t": 6.2
+    },
+    {
+      "key": "right",
+      "event": "down",
+      "t": 6.402
+    },
+    {
+      "key": "x",
+      "event": "down",
+      "t": 8.967
+    },
+    {
+      "key": "x",
+      "event": "up",
+      "t": 9.957
+    },
+    {
+      "key": "x",
+      "event": "down",
+      "t": 10.903
+    },
+    {
+      "key": "x",
+      "event": "up",
+      "t": 11.172
+    },
+    {
+      "key": "left",
+      "event": "down",
+      "t": 11.87
+    },
+    {
+      "key": "x",
+      "event": "down",
+      "t": 11.872
+    },
+    {
+      "key": "right",
+      "event": "up",
+      "t": 11.892
+    },
+    {
+      "key": "left",
+      "event": "up",
+      "t": 15.442
+    },
+    {
+      "key": "x",
+      "event": "up",
+      "t": 15.444
+    }
+  ]
+}
